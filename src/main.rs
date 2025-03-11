@@ -1,9 +1,14 @@
 use chrono::{DateTime, Local};
 use clap::Parser;
 use solana_client::rpc_client::RpcClient;
+use solana_sdk::signature::{Signature, read_keypair_file};
+use solana_sdk::signer::Signer;
+use solana_sdk::system_instruction;
+use solana_sdk::transaction::Transaction;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime};
 
 #[derive(Debug)]
 struct BenchmarkResult {
@@ -14,6 +19,8 @@ struct BenchmarkResult {
     end_system_time: Option<SystemTime>,
     block_height: Option<u64>,
     error: Option<String>,
+    transaction_signature: Option<Signature>,
+    transaction_block_height: Option<u64>,
 }
 
 impl BenchmarkResult {
@@ -26,6 +33,8 @@ impl BenchmarkResult {
             end_system_time: None,
             block_height: None,
             error: None,
+            transaction_signature: None,
+            transaction_block_height: None,
         }
     }
 
@@ -44,6 +53,14 @@ impl BenchmarkResult {
 
     fn set_block_height(&mut self, height: u64) {
         self.block_height = Some(height);
+    }
+
+    fn set_transaction_signature(&mut self, signature: Signature) {
+        self.transaction_signature = Some(signature);
+    }
+
+    fn set_transaction_block_height(&mut self, height: u64) {
+        self.transaction_block_height = Some(height);
     }
 
     fn format_system_time(time: SystemTime) -> String {
@@ -71,9 +88,19 @@ impl BenchmarkResult {
             .map(Self::format_system_time)
             .unwrap_or_else(|| "N/A".to_string());
 
+        let tx_signature = self
+            .transaction_signature
+            .map(|sig| sig.to_string())
+            .unwrap_or_else(|| "No signature".to_string());
+
+        let tx_block_height = self
+            .transaction_block_height
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+
         format!(
-            "Endpoint: {}\nStart Time: {}\nEnd Time: {}\nStatus: {}\nDuration: {}\n",
-            self.endpoint, start_time, end_time, status, duration
+            "Endpoint: {}\nStart Time: {}\nEnd Time: {}\nStatus: {}\nTransaction Signature: {}\nTransaction Block Height: {}\nDuration: {}\n",
+            self.endpoint, start_time, end_time, status, tx_signature, tx_block_height, duration
         )
     }
 }
@@ -93,7 +120,9 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
+    let keypair = read_keypair_file(&args.keypair_path).unwrap();
     println!("Using Solana keypair at: {}", args.keypair_path.display());
+    println!("Keypair public address: {}", keypair.pubkey());
 
     let endpoints: Vec<String> = args
         .endpoints
@@ -109,7 +138,9 @@ fn main() {
     let mut handles = vec![];
 
     // Spawn a thread for each endpoint
+    let keypair = Arc::new(keypair);
     for endpoint in endpoints {
+        let keypair = Arc::clone(&keypair);
         let handle = thread::spawn(move || {
             let mut result = BenchmarkResult::new(endpoint.clone());
 
@@ -121,6 +152,53 @@ fn main() {
                 }
                 Err(err) => {
                     result.set_error(err.to_string());
+                    result.complete();
+                    return result;
+                }
+            }
+
+            // Create a simple transfer instruction
+            let instruction = system_instruction::transfer(
+                &keypair.pubkey(),
+                &keypair.pubkey(),
+                1, // Send 1 lamport to self
+            );
+
+            // Create and sign transaction
+            let recent_blockhash = match rpc_client.get_latest_blockhash() {
+                Ok(blockhash) => blockhash,
+                Err(err) => {
+                    result.set_error(format!("Failed to get blockhash: {}", err));
+                    result.complete();
+                    return result;
+                }
+            };
+
+            let transaction = Transaction::new_signed_with_payer(
+                &[instruction],
+                Some(&keypair.pubkey()),
+                &[&keypair],
+                recent_blockhash,
+            );
+
+            match rpc_client.send_and_confirm_transaction(&transaction) {
+                Ok(signature) => {
+                    result.set_transaction_signature(signature);
+                    // Get the block height for the confirmed transaction
+                    match rpc_client.get_slot_with_commitment(rpc_client.commitment()) {
+                        Ok(slot) => {
+                            result.set_transaction_block_height(slot);
+                        }
+                        Err(err) => {
+                            result.set_error(format!(
+                                "Failed to get transaction block height: {}",
+                                err
+                            ));
+                        }
+                    }
+                }
+                Err(err) => {
+                    result.set_error(format!("Transaction failed: {}", err));
                 }
             }
 
