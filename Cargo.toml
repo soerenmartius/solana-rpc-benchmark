@@ -1,0 +1,12 @@
+[package]
+name = "solana-rpc-benchmark"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.1", features = ["derive"] }
+solana-client = "1.18.3"
+solana-sdk = "1.18.3"
+tokio = { version = "1.36.0", features = ["full"] }
+chrono = "0.4.34"
+serde_json = "1.0"
