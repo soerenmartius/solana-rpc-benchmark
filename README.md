@@ -29,5 +29,5 @@ To measure the performance, we want to log the following per thread and transact
 cargo run \
   -- \
   --endpoints "https://api.mainnet-beta.solana.com,https://rpc.ankr.com/solana/1b444b75ae9fc0e3d408c8b6dc67cd6949f672876733761724547b6afe798f31" \
-  --keypair ~/.config/solana/id.json
+  --keypair keypair.json
 ```
