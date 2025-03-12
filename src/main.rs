@@ -98,9 +98,22 @@ impl BenchmarkResult {
             .map(|h| h.to_string())
             .unwrap_or_else(|| "N/A".to_string());
 
+        let error_details = self
+            .error
+            .as_ref()
+            .map(|err| format!("Error Details: {}\n", err))
+            .unwrap_or_else(|| "".to_string());
+
         format!(
-            "Endpoint: {}\nStart Time: {}\nEnd Time: {}\nStatus: {}\nTransaction Signature: {}\nTransaction Block Height: {}\nDuration: {}\n",
-            self.endpoint, start_time, end_time, status, tx_signature, tx_block_height, duration
+            "Endpoint: {}\nStart Time: {}\nEnd Time: {}\nStatus: {}\nTransaction Signature: {}\nTransaction Block Height: {}\n{}Duration: {}\n",
+            self.endpoint,
+            start_time,
+            end_time,
+            status,
+            tx_signature,
+            tx_block_height,
+            error_details,
+            duration
         )
     }
 }
@@ -145,7 +158,10 @@ fn main() {
             let mut result = BenchmarkResult::new(endpoint.clone());
 
             // Create RPC client and fetch block height
-            let rpc_client = RpcClient::new(endpoint);
+            let rpc_client = RpcClient::new(endpoint.clone());
+
+            println!("Connecting to {}", endpoint);
+
             match rpc_client.get_block_height() {
                 Ok(height) => {
                     result.set_block_height(height);
@@ -164,15 +180,31 @@ fn main() {
                 1, // Send 1 lamport to self
             );
 
-            // Create and sign transaction
-            let recent_blockhash = match rpc_client.get_latest_blockhash() {
-                Ok(blockhash) => blockhash,
-                Err(err) => {
-                    result.set_error(format!("Failed to get blockhash: {}", err));
+            // Create and sign transaction - try multiple methods to get a blockhash
+            let recent_blockhash = {
+                // Method 1: Try get_latest_blockhash (newer method)
+                if let Ok(blockhash) = rpc_client.get_latest_blockhash() {
+                    println!("Got blockhash using get_latest_blockhash");
+                    blockhash
+                }
+                // Method 2: Try get_latest_blockhash_with_commitment
+                else if let Ok((blockhash, _)) =
+                    rpc_client.get_latest_blockhash_with_commitment(rpc_client.commitment())
+                {
+                    println!("Got blockhash using get_latest_blockhash_with_commitment");
+                    blockhash
+                }
+                // All methods failed
+                else {
+                    result.set_error(
+                        "Failed to get blockhash: All available methods failed".to_string(),
+                    );
                     result.complete();
                     return result;
                 }
             };
+
+            println!("Blockhash: {}", recent_blockhash);
 
             let transaction = Transaction::new_signed_with_payer(
                 &[instruction],
@@ -183,6 +215,8 @@ fn main() {
 
             match rpc_client.send_and_confirm_transaction(&transaction) {
                 Ok(signature) => {
+                    println!("Transaction signature: {}", signature);
+
                     result.set_transaction_signature(signature);
                     // Get the block height for the confirmed transaction
                     match rpc_client.get_slot_with_commitment(rpc_client.commitment()) {
